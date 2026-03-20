@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Мои проекты</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -17,7 +18,12 @@ body {
 .hdr small { font-size: 11px; color: #555; }
 .sync { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
 .sync button { background: #1a1a2e; border: 1px solid #2a2a4e; border-radius: 6px; color: #8888cc; cursor: pointer; font-size: 12px; padding: 6px 12px; font-family: inherit; }
+.sync button.drive { background: #1a2e1a; border-color: #2a4e2a; color: #88cc88; }
+.sync button.drive.active { background: #2a4e2a; }
+.sync button:disabled { opacity: 0.4; cursor: default; }
 .sync .msg { font-size: 11px; color: #4a8; margin-left: 8px; }
+.sync .msg.warn { color: #ca4; }
+.sync .msg.err { color: #c44; }
 .card { background: #1e1e1e; border: 1px solid #3a3a3a; border-left: 3px solid #3a3a3a; border-radius: 8px; padding: 14px 16px; margin-bottom: 8px; }
 .card.top { border-color: #e8913a; border-left-color: #e8913a; }
 .card.dead { background: #1a1a1a; border-color: #555; border-left-color: #555; opacity: 0.5; }
@@ -104,11 +110,11 @@ body {
     } catch(e) {
       state = {projects: JSON.parse(JSON.stringify(INIT)), history: {}, reviews: []};
     }
-    ui = {exp:{}, ed:null, ev:"", showNew:false, np:{title:"",emoji:"\uD83D\uDCCC",why:"",next:""}, showRev:false, showRevForm:false, rf:{did:"",skipped:"",focus:"",kazakh:""}, modal:null, msg:""};
+    ui = {exp:{}, ed:null, ev:"", showNew:false, np:{title:"",emoji:"\uD83D\uDCCC",why:"",next:""}, showRev:false, showRevForm:false, rf:{did:"",skipped:"",focus:"",kazakh:""}, modal:null, msg:"", msgCls:""};
     draw();
   }
 
-  function save() { try { localStorage.setItem("pt4", JSON.stringify(state)); } catch(e){} }
+  function save() { state.savedAt = new Date().toISOString(); try { localStorage.setItem("pt4", JSON.stringify(state)); } catch(e){} }
   function today() { return new Date().toISOString().slice(0,10); }
   function esc(s) { if (!s) return ""; var d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
   function find(id) { for(var i=0;i<state.projects.length;i++){if(state.projects[i].id===id)return state.projects[i];} return null; }
@@ -187,6 +193,127 @@ body {
     };
     reader.readAsText(file);
     input.value = "";
+  };
+
+  // ── GOOGLE DRIVE SYNC ──
+  var DRIVE_CLIENT_ID = "897218286399-lc7vup0et802hb0i6j9c4kphlp4vrjvl.apps.googleusercontent.com";
+  var DRIVE_SCOPES = "https://www.googleapis.com/auth/drive.appdata";
+  var DRIVE_FILE_NAME = "tracker-data.json";
+  var driveToken = null;
+
+  function driveAuth(callback) {
+    if (typeof google === "undefined" || !google.accounts) {
+      ui.msg = "\u274c Google API \u043d\u0435 \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u043b\u0441\u044f"; ui.msgCls = "err"; draw();
+      setTimeout(function(){ ui.msg=""; draw(); }, 3000);
+      return;
+    }
+    var client = google.accounts.oauth2.initTokenClient({
+      client_id: DRIVE_CLIENT_ID,
+      scope: DRIVE_SCOPES,
+      callback: function(resp) {
+        if (resp.error) {
+          ui.msg = "\u274c \u041e\u0448\u0438\u0431\u043a\u0430 \u0430\u0432\u0442\u043e\u0440\u0438\u0437\u0430\u0446\u0438\u0438"; ui.msgCls = "err"; draw();
+          setTimeout(function(){ ui.msg=""; draw(); }, 3000);
+          return;
+        }
+        driveToken = resp.access_token;
+        callback();
+      }
+    });
+    client.requestAccessToken();
+  }
+
+  function driveFetch(url, opts) {
+    opts = opts || {};
+    opts.headers = opts.headers || {};
+    opts.headers["Authorization"] = "Bearer " + driveToken;
+    return fetch(url, opts).then(function(r) { return r.json(); });
+  }
+
+  function driveFindFile(callback) {
+    driveFetch("https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name%3D%27" + DRIVE_FILE_NAME + "%27&fields=files(id,name,modifiedTime)&orderBy=modifiedTime%20desc&pageSize=1")
+      .then(function(data) { callback(data.files && data.files.length > 0 ? data.files[0] : null); })
+      .catch(function() { callback(null); });
+  }
+
+  window.ptDriveSave = function() {
+    ui.msg = "\u23F3 \u041f\u043e\u0434\u043a\u043b\u044e\u0447\u0430\u044e\u0441\u044c..."; ui.msgCls = ""; draw();
+    driveAuth(function() {
+      ui.msg = "\u23F3 \u0421\u043e\u0445\u0440\u0430\u043d\u044f\u044E..."; draw();
+      save(); // update savedAt
+      var jsonStr = JSON.stringify(state, null, 2);
+      driveFindFile(function(existing) {
+        var metadata = { name: DRIVE_FILE_NAME, mimeType: "application/json" };
+        var boundary = "----tracker" + Date.now();
+        var body = "--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" + JSON.stringify(metadata) + "\r\n--" + boundary + "\r\nContent-Type: application/json\r\n\r\n" + jsonStr + "\r\n--" + boundary + "--";
+
+        var url, method;
+        if (existing) {
+          url = "https://www.googleapis.com/upload/drive/v3/files/" + existing.id + "?uploadType=multipart";
+          method = "PATCH";
+        } else {
+          metadata.parents = ["appDataFolder"];
+          body = "--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" + JSON.stringify(metadata) + "\r\n--" + boundary + "\r\nContent-Type: application/json\r\n\r\n" + jsonStr + "\r\n--" + boundary + "--";
+          url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
+          method = "POST";
+        }
+
+        fetch(url, {
+          method: method,
+          headers: { "Authorization": "Bearer " + driveToken, "Content-Type": "multipart/related; boundary=" + boundary },
+          body: body
+        }).then(function(r) { return r.json(); }).then(function(data) {
+          if (data.id) {
+            ui.msg = "\u2705 \u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e \u043d\u0430 Drive!"; ui.msgCls = "";
+          } else {
+            ui.msg = "\u274c \u041e\u0448\u0438\u0431\u043a\u0430 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u044f"; ui.msgCls = "err";
+          }
+          draw(); setTimeout(function(){ ui.msg=""; draw(); }, 3000);
+        }).catch(function() {
+          ui.msg = "\u274c \u041e\u0448\u0438\u0431\u043a\u0430 \u0441\u0435\u0442\u0438"; ui.msgCls = "err";
+          draw(); setTimeout(function(){ ui.msg=""; draw(); }, 3000);
+        });
+      });
+    });
+  };
+
+  window.ptDriveLoad = function() {
+    ui.msg = "\u23F3 \u041f\u043e\u0434\u043a\u043b\u044e\u0447\u0430\u044e\u0441\u044c..."; ui.msgCls = ""; draw();
+    driveAuth(function() {
+      ui.msg = "\u23F3 \u0417\u0430\u0433\u0440\u0443\u0436\u0430\u044e..."; draw();
+      driveFindFile(function(existing) {
+        if (!existing) {
+          ui.msg = "\u26a0\ufe0f \u0424\u0430\u0439\u043b \u043d\u0430 Drive \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d. \u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0441\u043e\u0445\u0440\u0430\u043d\u0438."; ui.msgCls = "warn";
+          draw(); setTimeout(function(){ ui.msg=""; draw(); }, 4000);
+          return;
+        }
+        fetch("https://www.googleapis.com/drive/v3/files/" + existing.id + "?alt=media", {
+          headers: { "Authorization": "Bearer " + driveToken }
+        }).then(function(r) { return r.json(); }).then(function(remote) {
+          if (!remote.projects) {
+            ui.msg = "\u274c \u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u0444\u043e\u0440\u043c\u0430\u0442 \u043d\u0430 Drive"; ui.msgCls = "err";
+            draw(); setTimeout(function(){ ui.msg=""; draw(); }, 3000);
+            return;
+          }
+          // Date check
+          var localDate = state.savedAt ? new Date(state.savedAt) : new Date(0);
+          var remoteDate = remote.savedAt ? new Date(remote.savedAt) : new Date(0);
+          if (localDate > remoteDate) {
+            if (!confirm("\u26a0\ufe0f \u041b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435 \u041d\u041e\u0412\u0415\u0415 \u0447\u0435\u043c \u043d\u0430 Drive!\n\n\u041b\u043e\u043a\u0430\u043b\u044c\u043d\u043e: " + localDate.toLocaleString("ru") + "\nDrive: " + remoteDate.toLocaleString("ru") + "\n\n\u0412\u0441\u0451 \u0440\u0430\u0432\u043d\u043e \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u0441 Drive? \u041b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0431\u0443\u0434\u0443\u0442 \u043f\u043e\u0442\u0435\u0440\u044f\u043d\u044b.")) {
+              ui.msg = "\u041e\u0442\u043c\u0435\u043d\u0435\u043d\u043e"; ui.msgCls = "warn";
+              draw(); setTimeout(function(){ ui.msg=""; draw(); }, 2000);
+              return;
+            }
+          }
+          state = remote; save();
+          ui.msg = "\u2705 \u0417\u0430\u0433\u0440\u0443\u0436\u0435\u043d\u043e \u0441 Drive! (" + state.projects.length + " \u043f\u0440\u043e\u0435\u043a\u0442\u043e\u0432)"; ui.msgCls = "";
+          draw(); setTimeout(function(){ ui.msg=""; draw(); }, 3000);
+        }).catch(function() {
+          ui.msg = "\u274c \u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438"; ui.msgCls = "err";
+          draw(); setTimeout(function(){ ui.msg=""; draw(); }, 3000);
+        });
+      });
+    });
   };
 
   window.ptStartEdit = function(pid, fld) {
@@ -288,10 +415,13 @@ body {
     var h = '<div class="hdr"><h1>\u041c\u043e\u0438 \u043f\u0440\u043e\u0435\u043a\u0442\u044b</h1><small>\u25B2\u25BC \u043f\u0440\u0438\u043e\u0440\u0438\u0442\u0435\u0442</small></div>';
 
     h += '<div class="sync">';
-    h += '<button onclick="ptExport()">\uD83D\uDCBE \u0412\u044b\u0433\u0440\u0443\u0437\u0438\u0442\u044c</button>';
-    h += '<button onclick="document.getElementById(\'imp\').click()">\uD83D\uDCC2 \u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c</button>';
+    h += '<button class="drive" onclick="ptDriveSave()">\u2601 \u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043d\u0430 Drive</button>';
+    h += '<button class="drive" onclick="ptDriveLoad()">\u2601 \u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u0441 Drive</button>';
+    h += '<button onclick="ptExport()">\uD83D\uDCBE JSON</button>';
+    h += '<button onclick="document.getElementById(\'imp\').click()">\uD83D\uDCC2 JSON</button>';
     h += '<input type="file" id="imp" accept=".json" style="display:none" onchange="ptImport(this)">';
-    if (ui.msg) h += '<span class="msg">' + esc(ui.msg) + '</span>';
+    var msgCls = ui.msgCls ? " " + ui.msgCls : "";
+    if (ui.msg) h += '<span class="msg' + msgCls + '">' + esc(ui.msg) + '</span>';
     h += '</div>';
 
     for (var i = 0; i < act.length; i++) h += renderCard(act[i], i, true);
